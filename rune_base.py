@@ -126,8 +126,8 @@ SPLASH_WIDTH = ui_px(300)
 SPLASH_HEIGHT = ui_px(310)
 RESTORE_BLUR_CLEAR_TOP = 88
 RESTORE_BLUR_HOLD_MS = 300
-RESTORE_BLUR_FADE_STEP_MS = 50
-RESTORE_BLUR_FADE_STEP_ALPHA = 0.20
+RESTORE_BLUR_FADE_STEP_MS = 16
+RESTORE_BLUR_FADE_MS = 200
 OFFLINE_RUNE_ALERT_LIMIT = 3
 OFFLINE_RUNE_ALERT_INTERVAL_SECONDS = 3.0
 RUNE_WINDOW_SYNC_INTERVAL_SECONDS = 6.0
@@ -3573,7 +3573,7 @@ class MapleTimerApp:
         self._switch_page_with_blur(target)
 
     def _switch_page_with_blur(self, name):
-        if getattr(self, "current_page", None) == name:
+        if getattr(self, "current_page", None) == name or getattr(self, "page_transition_active", False):
             return
         should_blur = False
         position_before = self._current_raw_position()
@@ -3584,15 +3584,16 @@ class MapleTimerApp:
         except tk.TclError:
             should_blur = False
         self._cancel_surface_refresh()
+        # Cover the outgoing page before mapping the destination. Capturing
+        # after _show_page briefly exposes the sharp destination before blur.
+        if should_blur:
+            self._destroy_restore_blur_overlay()
+            self.page_transition_active = True
+            self._capture_restore_blur_image()
+            self._show_restore_blur_overlay(hold_ms=0)
+            self.page_transition_active = getattr(self, "restore_blur_overlay", None) is not None
         self._show_page(name)
         self._restore_page_transition_position(position_before, size_before)
-        if should_blur:
-            try:
-                self.root.update_idletasks()
-                self._capture_restore_blur_image()
-                self._show_restore_blur_overlay()
-            except tk.TclError:
-                pass
         self.root.after(40, lambda pos=position_before, size=size_before: self._restore_page_transition_position(pos, size))
         self.root.after(180, lambda pos=position_before, size=size_before: self._restore_page_transition_position(pos, size))
 
@@ -4590,7 +4591,7 @@ class MapleTimerApp:
             ImageDraw.Draw(image).rectangle((0, 0, width, clear_top), fill=(18, 19, 20, 255))
         return self._clip_restore_blur_to_app_shape(image)
 
-    def _show_restore_blur_overlay(self):
+    def _show_restore_blur_overlay(self, hold_ms=None):
         self._destroy_restore_blur_overlay()
         try:
             width = max(1, int(self.root.winfo_width()))
@@ -4618,14 +4619,15 @@ class MapleTimerApp:
             self.restore_blur_overlay = overlay
             overlay.lift()
             overlay.update_idletasks()
-            self.root.after(10, self._raise_restore_blur_overlay)
-            self.root.after(RESTORE_BLUR_HOLD_MS, lambda: self._fade_restore_blur_overlay(0.80))
+            self.root.after(10, lambda window=overlay: self._raise_restore_blur_overlay(window))
+            delay = RESTORE_BLUR_HOLD_MS if hold_ms is None else hold_ms
+            self.root.after(delay, lambda window=overlay: self._fade_restore_blur_overlay(0.96, window))
         except tk.TclError:
             self._destroy_restore_blur_overlay()
 
-    def _raise_restore_blur_overlay(self):
+    def _raise_restore_blur_overlay(self, expected_overlay=None):
         overlay = getattr(self, "restore_blur_overlay", None)
-        if overlay is None:
+        if overlay is None or (expected_overlay is not None and overlay is not expected_overlay):
             return
         try:
             overlay.lift()
@@ -4633,18 +4635,21 @@ class MapleTimerApp:
         except tk.TclError:
             pass
 
-    def _fade_restore_blur_overlay(self, alpha):
+    def _fade_restore_blur_overlay(self, alpha, expected_overlay=None, started_at=None):
         overlay = getattr(self, "restore_blur_overlay", None)
-        if overlay is None:
+        if overlay is None or (expected_overlay is not None and overlay is not expected_overlay):
             return
+        now = time.monotonic()
+        started_at = now if started_at is None else started_at
+        progress = min(1.0, max(0.0, (now - started_at) * 1000 / RESTORE_BLUR_FADE_MS))
         try:
-            if alpha <= 0.05:
+            if progress >= 1.0:
                 self._destroy_restore_blur_overlay()
                 return
-            overlay.attributes("-alpha", alpha)
+            overlay.attributes("-alpha", alpha * (1.0 - progress))
             self.root.after(
                 RESTORE_BLUR_FADE_STEP_MS,
-                lambda: self._fade_restore_blur_overlay(alpha - RESTORE_BLUR_FADE_STEP_ALPHA),
+                lambda: self._fade_restore_blur_overlay(alpha, overlay, started_at),
             )
         except tk.TclError:
             self._destroy_restore_blur_overlay()
@@ -4657,6 +4662,7 @@ class MapleTimerApp:
             except tk.TclError:
                 pass
         self.restore_blur_overlay = None
+        self.page_transition_active = False
 
     def _set_region(self, region):
         self.region = region

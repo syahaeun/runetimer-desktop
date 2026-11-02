@@ -4295,10 +4295,20 @@ class MapleTimerApp:
                                         right_x + offset + 6, rune_y + 14,
                                         fill="#e0fcf0", outline="", tags="widget_count_state")
         else:
-            canvas.create_polygon(right_x - 10, rune_y - 16,
-                                  right_x - 10, rune_y + 16,
-                                  right_x + 16, rune_y,
-                                  fill="#e0fcf0", outline="", tags="widget_count_state")
+            # Tk polygons have hard pixel edges. Render the small diagonal at
+            # higher resolution and downsample at the actual widget scale.
+            factor = WIDGET_WIDTH / 384 if LOW_RES else 1.0
+            if getattr(self, "widget_play_photo", None) is None:
+                scale = 4
+                icon = Image.new("RGBA", (32 * scale, 36 * scale), (0, 0, 0, 0))
+                ImageDraw.Draw(icon).polygon(
+                    [(2 * scale, 2 * scale), (2 * scale, 34 * scale), (28 * scale, 18 * scale)],
+                    fill="#e0fcf0")
+                icon = icon.resize((round(32 * factor), round(36 * factor)), Image.Resampling.LANCZOS)
+                self.widget_play_photo = ImageTk.PhotoImage(icon)
+            # Images are excluded from the low-resolution canvas scaling below.
+            canvas.create_image((right_x - 12) * factor, (rune_y - 18) * factor,
+                                image=self.widget_play_photo, anchor="nw", tags="widget_count_state")
         self.widget_count_text_item = canvas.create_text(right_x, value_y, text=str(display_seconds), fill=number_fill, font=widget_value_font, anchor="center")
 
         if LOW_RES:

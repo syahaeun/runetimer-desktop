@@ -1604,6 +1604,10 @@ class MapleTimerApp:
             return
 
     def _show_main_window(self, alpha=None, force_focus=False):
+        dialog = getattr(self, "disclaimer_dialog", None)
+        if dialog is not None and dialog.winfo_exists():
+            self._raise_disclaimer_dialog(dialog)
+            return
         if getattr(self, "widget_mode_active", False):
             self._hide_main_for_widget_mode()
             return
@@ -1636,6 +1640,10 @@ class MapleTimerApp:
             pass
 
     def _force_main_window_visible(self, force_focus=False, attempts=2):
+        dialog = getattr(self, "disclaimer_dialog", None)
+        if dialog is not None and dialog.winfo_exists():
+            self._raise_disclaimer_dialog(dialog)
+            return
         if getattr(self, "widget_mode_active", False):
             self._hide_main_for_widget_mode()
             return
@@ -1693,7 +1701,12 @@ class MapleTimerApp:
             return
         try:
             widget = getattr(self, "widget", None)
-            if getattr(self, "widget_mode_active", False) and widget is not None and widget.winfo_exists():
+            dialog = getattr(self, "disclaimer_dialog", None)
+            if dialog is not None and dialog.winfo_exists():
+                self.root.attributes("-topmost", False)
+                dialog.attributes("-topmost", True)
+                dialog.lift()
+            elif getattr(self, "widget_mode_active", False) and widget is not None and widget.winfo_exists():
                 self._hide_main_for_widget_mode()
                 widget.attributes("-topmost", True)
             elif self.root.state() == "normal" and self.root.winfo_viewable():
@@ -1979,6 +1992,34 @@ class MapleTimerApp:
         label.pack(**pack_options)
         return label
 
+    def _disclaimer_work_area(self):
+        """Use one monitor's usable area, excluding its taskbar."""
+        if sys.platform.startswith("win"):
+            try:
+                from ctypes import wintypes
+
+                class MonitorInfo(ctypes.Structure):
+                    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+                user32 = ctypes.windll.user32
+                monitor_from_window = user32.MonitorFromWindow
+                monitor_from_window.argtypes = [wintypes.HWND, wintypes.DWORD]
+                monitor_from_window.restype = wintypes.HANDLE
+                get_info = user32.GetMonitorInfoW
+                get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(MonitorInfo)]
+                get_info.restype = wintypes.BOOL
+                hwnd = self.root.winfo_id() if getattr(self, "main_app_started", False) else 0
+                monitor = monitor_from_window(hwnd, 2 if hwnd else 1)
+                info = MonitorInfo()
+                info.cbSize = ctypes.sizeof(info)
+                if get_info(monitor, ctypes.byref(info)):
+                    r = info.rcWork
+                    return r.left, r.top, r.right, r.bottom
+            except (AttributeError, OSError, tk.TclError):
+                pass
+        return (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+
     def _show_disclaimer_dialog(self, readonly=False, on_accept=None, on_close=None):
         existing = getattr(self, "disclaimer_dialog", None)
         try:
@@ -1989,22 +2030,22 @@ class MapleTimerApp:
             pass
 
         c = self.colors
-        screen_left, screen_top, screen_right, screen_bottom = self._virtual_screen_bounds()
+        screen_left, screen_top, screen_right, screen_bottom = self._disclaimer_work_area()
         screen_w = max(1, screen_right - screen_left)
         screen_h = max(1, screen_bottom - screen_top)
-        width = min(720 if LOW_RES else 1120, max(480, screen_w - 40))
-        height = min(700 if LOW_RES else 1240, max(480, screen_h - 70))
+        width = min(720 if LOW_RES else 1120, max(1, screen_w - 40))
+        height = min(700 if LOW_RES else 1240, max(1, screen_h - 40))
         dialog = tk.Toplevel(self.root)
         self.disclaimer_dialog = dialog
         dialog.title(DISCLAIMER_TITLE)
-        dialog.geometry(self._center_geometry(width, height))
+        x = screen_left + (screen_w - width) // 2
+        y = screen_top + (screen_h - height) // 2
+        dialog.geometry(f"{width}x{height}{x:+d}{y:+d}")
         dialog.resizable(False, False)
         dialog.overrideredirect(True)
-        dialog.configure(bg=TRANSPARENT)
-        try:
-            dialog.wm_attributes("-transparentcolor", TRANSPARENT)
-        except tk.TclError:
-            pass
+        # Let the native window region clip a solid surface. Antialiasing a
+        # color-keyed canvas blends magenta into the rounded edge.
+        dialog.configure(bg=c["surface"])
         dialog.attributes("-topmost", True)
         self._apply_window_icon(dialog)
         try:
@@ -2013,7 +2054,16 @@ class MapleTimerApp:
         except tk.TclError:
             pass
 
+        owner_disabled = False
+        owner_topmost = self.root.attributes("-topmost")
+        self.root.attributes("-topmost", False)
+
         def clear_dialog():
+            if owner_disabled:
+                try:
+                    self.root.attributes("-disabled", False)
+                except tk.TclError:
+                    pass
             try:
                 dialog.grab_release()
             except tk.TclError:
@@ -2021,6 +2071,10 @@ class MapleTimerApp:
             self.disclaimer_dialog = None
             try:
                 dialog.destroy()
+            except tk.TclError:
+                pass
+            try:
+                self.root.attributes("-topmost", owner_topmost)
             except tk.TclError:
                 pass
 
@@ -2034,21 +2088,8 @@ class MapleTimerApp:
             if on_accept:
                 on_accept()
 
-        shell = tk.Canvas(dialog, width=width, height=height, bg=TRANSPARENT, highlightthickness=0, bd=0)
+        shell = tk.Canvas(dialog, width=width, height=height, bg=c["surface"], highlightthickness=0, bd=0)
         shell.pack(fill="both", expand=True)
-        outer_radius = max(54, min(82, int(min(width, height) * 0.08)))
-        self._canvas_rounded_rect(shell, 16, 18, width - 12, height - 8, outer_radius, fill="#000000", outline="")
-        self._canvas_rounded_rect(
-            shell,
-            8,
-            8,
-            width - 14,
-            height - 14,
-            outer_radius,
-            fill=c["surface"],
-            outline="#182020",
-            width=1,
-        )
 
         container = tk.Frame(shell, bg=c["surface"], padx=0, pady=0)
         shell.create_window(18, 18, anchor="nw", window=container, width=width - 40, height=height - 40)
@@ -2060,7 +2101,9 @@ class MapleTimerApp:
             drag_state["y"] = event.y_root - dialog.winfo_y()
 
         def drag_dialog(event):
-            dialog.geometry(f"+{event.x_root - drag_state['x']}+{event.y_root - drag_state['y']}")
+            x = max(screen_left, min(event.x_root - drag_state['x'], screen_right - width))
+            y = max(screen_top, min(event.y_root - drag_state['y'], screen_bottom - height))
+            dialog.geometry(f"{x:+d}{y:+d}")
 
         inner_width = width - 40
         hero_height = max(132, int((height - 40) * 0.14))
@@ -2139,11 +2182,11 @@ class MapleTimerApp:
         content.bind("<Configure>", refresh_scroll_region)
         dialog.bind("<MouseWheel>", scroll_disclaimer)
 
-        max_text_width = max(520, inner_width - 150)
+        max_text_width = max(1, inner_width - 234)
         terms_panel = tk.Frame(content, bg=c["panel"], padx=24, pady=24, highlightthickness=1, highlightbackground=c["line"])
         terms_panel.pack(fill="x", pady=(0, 22))
         for index, paragraph in enumerate(DISCLAIMER_TERMS_PARAGRAPHS):
-            tk.Label(
+            paragraph_label = tk.Label(
                 terms_panel,
                 text=paragraph,
                 bg=c["panel"],
@@ -2152,10 +2195,13 @@ class MapleTimerApp:
                 justify="left",
                 anchor="w",
                 wraplength=max_text_width,
-            ).pack(fill="x", anchor="w", pady=(0, 18 if index < len(DISCLAIMER_TERMS_PARAGRAPHS) - 1 else 0))
+            )
+            paragraph_label.pack(fill="x", anchor="w", pady=(0, 18 if index < len(DISCLAIMER_TERMS_PARAGRAPHS) - 1 else 0))
+            paragraph_label.bind("<Configure>", lambda event: event.widget.configure(wraplength=max(1, event.width)))
 
         action_area = tk.Frame(body, bg=c["surface"], padx=34, pady=0)
-        action_area.pack(fill="x", pady=(22, 0))
+        # Reserve the buttons before giving the remaining height to the text.
+        action_area.pack(side="bottom", fill="x", pady=(22, 0), before=scroll_row)
 
         confirm = tk.Frame(action_area, bg=c["panel"], padx=20, pady=15, highlightthickness=1, highlightbackground=c["line"])
         confirm.pack(fill="x", anchor="w", pady=(0, 24))
@@ -2228,6 +2274,12 @@ class MapleTimerApp:
         close_button.lift()
 
         dialog.protocol("WM_DELETE_WINDOW", clear_dialog if readonly else handle_close)
+        if sys.platform.startswith("win"):
+            try:
+                self.root.attributes("-disabled", True)
+                owner_disabled = True
+            except tk.TclError:
+                pass
         self._raise_disclaimer_dialog(dialog, width, height)
         for delay in (120, 450, 1000):
             try:
